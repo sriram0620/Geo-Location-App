@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "bolt-expo-nativewind",
+    "slug": "bolt-expo-nativewind",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "myapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "extra": {
+      "firebaseApiKey": "AIzaSyCT6oX1RuGc0sSUEOD7tE4d_jxHZY8YjXQ",
+      "firebaseAuthDomain": "geo-attentendence-app.firebaseapp.com",
+      "firebaseProjectId": "geo-attentendence-app",
+      "firebaseStorageBucket": "eo-attentendence-app.firebasestorage.app",
+      "firebaseMessagingSenderId": "835384490983",
+      "firebaseAppId": "1:835384490983:web:3df9ea0a517703ba37db42"
+    },
+    "plugins": ["expo-router"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
