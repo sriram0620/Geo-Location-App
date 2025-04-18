@@ -27,12 +27,13 @@ import {
   Smartphone,
   Mail,
   Phone,
-  LogIn, // Added LogIn import
 } from "lucide-react-native"
 import { LinearGradient } from "expo-linear-gradient"
 import { MotiView } from "moti"
-import { LineChart, BarChart, PieChart } from "react-native-chart-kit"
 import { format, startOfWeek, endOfWeek, eachDayOfInterval, isSameDay } from "date-fns"
+import { ProfileStats } from "../../components/profile/ProfileStats"
+import { AttendanceCharts } from "../../components/profile/AttendanceCharts"
+import { ActivityList } from "../../components/profile/ActivityList"
 
 const { width } = Dimensions.get("window")
 
@@ -54,6 +55,7 @@ export default function ProfileScreen() {
     data: [],
   })
   const [expandedSection, setExpandedSection] = useState<string | null>(null)
+  const [effectiveHours, setEffectiveHours] = useState("0h 0m")
 
   const router = useRouter()
   const fadeAnim = useRef(new Animated.Value(0)).current
@@ -71,16 +73,16 @@ export default function ProfileScreen() {
         setUserData(userDoc.data())
       }
 
-      // Get attendance records
+      // Get attendance records with a more specific query
       const attendanceQuery = query(
         collection(db, "attendance"),
         where("userId", "==", auth.currentUser.uid),
-        orderBy("timestamp", "desc"),
-        limit(50),
+        orderBy("timestampDate", "desc"),
+        limit(100), // Fetch more records to ensure we have enough data for calculations
       )
 
       const attendanceSnapshot = await getDocs(attendanceQuery)
-      const attendanceRecords: any[] = []
+      const attendanceRecords = []
       attendanceSnapshot.forEach((doc) => {
         attendanceRecords.push({
           id: doc.id,
@@ -90,8 +92,11 @@ export default function ProfileScreen() {
 
       setAttendanceData(attendanceRecords)
 
-      // Process data for charts
+      // Process data for charts with real data
       processAttendanceData(attendanceRecords)
+
+      // Calculate effective hours with real data
+      calculateEffectiveHours(attendanceRecords)
     } catch (error) {
       console.error("Error fetching user data:", error)
     } finally {
@@ -100,8 +105,8 @@ export default function ProfileScreen() {
     }
   }
 
-  // Process attendance data for charts
-  const processAttendanceData = (records: any[]) => {
+  // Improve the processAttendanceData function to use real data for charts
+  const processAttendanceData = (records) => {
     if (!records.length) return
 
     // Process weekly data
@@ -113,7 +118,9 @@ export default function ProfileScreen() {
     const weekLabels = daysOfWeek.map((date) => format(date, "EEE"))
     const weekData = daysOfWeek.map((day) => {
       const dayRecords = records.filter((record) => {
-        const recordDate = new Date(record.timestamp)
+        const recordDate = record.timestampDate?.seconds
+          ? new Date(record.timestampDate.seconds * 1000)
+          : new Date(record.timestamp)
         return isSameDay(recordDate, day) && record.type === "check-in"
       })
       return dayRecords.length
@@ -139,24 +146,18 @@ export default function ProfileScreen() {
     const monthLabels = last7Days.map((date) => format(date, "dd"))
     const monthData = last7Days.map((day) => {
       let hoursWorked = 0
-      const dayRecords = records.filter((record) => {
-        const recordDate = new Date(record.timestamp)
-        return isSameDay(recordDate, day)
+
+      // Get all check-out records for this day that have a durationMinutes field
+      const checkOuts = records.filter((record) => {
+        const recordDate = record.timestampDate?.seconds
+          ? new Date(record.timestampDate.seconds * 1000)
+          : new Date(record.timestamp)
+        return isSameDay(recordDate, day) && record.type === "check-out" && record.durationMinutes
       })
 
-      // Calculate hours worked
-      const checkIns = dayRecords.filter((record) => record.type === "check-in")
-      const checkOuts = dayRecords.filter((record) => record.type === "check-out")
-
-      checkIns.forEach((checkIn) => {
-        const matchingCheckOut = checkOuts.find(
-          (checkOut) => new Date(checkOut.timestamp).getTime() > new Date(checkIn.timestamp).getTime(),
-        )
-        if (matchingCheckOut) {
-          const duration =
-            (new Date(matchingCheckOut.timestamp).getTime() - new Date(checkIn.timestamp).getTime()) / (1000 * 60 * 60)
-          hoursWorked += duration
-        }
+      // Sum up the durations
+      checkOuts.forEach((checkOut) => {
+        hoursWorked += checkOut.durationMinutes / 60 // Convert minutes to hours
       })
 
       return Math.round(hoursWorked * 10) / 10 // Round to 1 decimal place
@@ -180,10 +181,58 @@ export default function ProfileScreen() {
     setAttendanceDistribution({
       labels: ["Check-ins", "Check-outs"],
       data: [checkIns / totalRecords || 0, checkOuts / totalRecords || 0],
-      colors: ["#4CAF50", "#F44336"],
+      colors: ["#6C63FF", "#FF6B6B"],
       legendFontColor: "#7F7F7F",
       legendFontSize: 12,
     })
+  }
+
+  // Improve the calculateEffectiveHours function for more accurate calculations
+  const calculateEffectiveHours = (records) => {
+    if (!records || records.length === 0) {
+      setEffectiveHours("0h 0m")
+      return
+    }
+
+    // Group check-ins with their corresponding check-outs
+    const pairedActivities = {}
+
+    // First, collect all check-ins
+    records.forEach((activity) => {
+      if (activity.type === "check-in") {
+        pairedActivities[activity.id] = {
+          checkIn: activity,
+        }
+      }
+    })
+
+    // Then, match check-outs with their check-ins
+    records.forEach((activity) => {
+      if (activity.type === "check-out" && activity.checkInId && pairedActivities[activity.checkInId]) {
+        pairedActivities[activity.checkInId].checkOut = activity
+      }
+    })
+
+    // Calculate total minutes from complete pairs
+    let totalMinutes = 0
+    Object.values(pairedActivities).forEach((pair) => {
+      if (pair.checkIn && pair.checkOut) {
+        // If we have both check-in and check-out, use the stored duration or calculate it
+        if (pair.checkOut.durationMinutes) {
+          totalMinutes += pair.checkOut.durationMinutes
+        } else {
+          const checkInTime = new Date(pair.checkIn.timestamp)
+          const checkOutTime = new Date(pair.checkOut.timestamp)
+          const durationMs = checkOutTime.getTime() - checkInTime.getTime()
+          totalMinutes += Math.round(durationMs / (1000 * 60))
+        }
+      }
+    })
+
+    // Format the result
+    const hours = Math.floor(totalMinutes / 60)
+    const minutes = totalMinutes % 60
+    setEffectiveHours(`${hours}h ${minutes}m`)
   }
 
   // Handle sign out
@@ -197,77 +246,19 @@ export default function ProfileScreen() {
   }
 
   // Format date for display
-  const formatDate = (timestamp: string | null) => {
+  const formatDate = (timestamp) => {
     if (!timestamp) return "N/A"
     return new Date(timestamp).toLocaleDateString([], {
-      year: "numeric",
       month: "short",
       day: "numeric",
+      year: "numeric",
     })
   }
 
   // Format time for display
-  const formatTime = (timestamp: string | null) => {
+  const formatTime = (timestamp) => {
     if (!timestamp) return "N/A"
-    return new Date(timestamp).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-  }
-
-  // Calculate total hours worked
-  const calculateTotalHours = () => {
-    if (!attendanceData.length) return "0h"
-
-    const checkIns = attendanceData.filter((record) => record.type === "check-in")
-    const checkOuts = attendanceData.filter((record) => record.type === "check-out")
-
-    let totalMinutes = 0
-    checkIns.forEach((checkIn) => {
-      const matchingCheckOut = checkOuts.find(
-        (checkOut) => new Date(checkOut.timestamp).getTime() > new Date(checkIn.timestamp).getTime(),
-      )
-      if (matchingCheckOut) {
-        const duration =
-          (new Date(matchingCheckOut.timestamp).getTime() - new Date(checkIn.timestamp).getTime()) / (1000 * 60)
-        totalMinutes += duration
-      }
-    })
-
-    const hours = Math.floor(totalMinutes / 60)
-    const minutes = Math.round(totalMinutes % 60)
-    return `${hours}h ${minutes}m`
-  }
-
-  // Calculate average hours per day
-  const calculateAverageHours = () => {
-    if (!attendanceData.length) return "0h"
-
-    const checkIns = attendanceData.filter((record) => record.type === "check-in")
-    const checkOuts = attendanceData.filter((record) => record.type === "check-out")
-
-    let totalMinutes = 0
-    const daysWorked = new Set()
-
-    checkIns.forEach((checkIn) => {
-      const checkInDate = new Date(checkIn.timestamp)
-      const dateString = checkInDate.toDateString()
-      daysWorked.add(dateString)
-
-      const matchingCheckOut = checkOuts.find(
-        (checkOut) => new Date(checkOut.timestamp).getTime() > checkInDate.getTime(),
-      )
-      if (matchingCheckOut) {
-        const duration = (new Date(matchingCheckOut.timestamp).getTime() - checkInDate.getTime()) / (1000 * 60)
-        totalMinutes += duration
-      }
-    })
-
-    const totalDays = daysWorked.size || 1
-    const avgMinutesPerDay = totalMinutes / totalDays
-    const hours = Math.floor(avgMinutesPerDay / 60)
-    const minutes = Math.round(avgMinutesPerDay % 60)
-    return `${hours}h ${minutes}m`
+    return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
   }
 
   // Toggle section expansion
@@ -348,22 +339,8 @@ export default function ProfileScreen() {
             </View>
           </View>
 
-          <View style={styles.profileStats}>
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{attendanceData.filter((a) => a.type === "check-in").length || 0}</Text>
-              <Text style={styles.statLabel}>Check-ins</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{calculateTotalHours()}</Text>
-              <Text style={styles.statLabel}>Total Hours</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{calculateAverageHours()}</Text>
-              <Text style={styles.statLabel}>Avg. Daily</Text>
-            </View>
-          </View>
+          {/* Use the ProfileStats component */}
+          <ProfileStats userData={userData} attendanceData={attendanceData} effectiveHours={effectiveHours} />
         </LinearGradient>
       </MotiView>
 
@@ -483,44 +460,13 @@ export default function ProfileScreen() {
           />
         </TouchableOpacity>
 
-        {expandedSection === "weeklyAttendance" && (
-          <MotiView
-            from={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            transition={{ type: "timing", duration: 300 }}
-            style={styles.cardContent}
-          >
-            {weeklyStats.datasets[0].data.some((value: number) => value > 0) ? (
-              <View style={styles.chartContainer}>
-                <Text style={styles.chartTitle}>Check-ins per Day</Text>
-                <BarChart
-                  data={weeklyStats}
-                  width={width - 60}
-                  height={220}
-                  yAxisSuffix=""
-                  chartConfig={{
-                    backgroundColor: "#ffffff",
-                    backgroundGradientFrom: "#ffffff",
-                    backgroundGradientTo: "#ffffff",
-                    decimalPlaces: 0,
-                    color: (opacity = 1) => `rgba(108, 99, 255, ${opacity})`,
-                    labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-                    style: {
-                      borderRadius: 16,
-                    },
-                    barPercentage: 0.7,
-                  }}
-                  style={styles.chart}
-                  showValuesOnTopOfBars
-                />
-              </View>
-            ) : (
-              <View style={styles.noDataContainer}>
-                <Text style={styles.noDataText}>No attendance data available for this week</Text>
-              </View>
-            )}
-          </MotiView>
-        )}
+        {/* Use the AttendanceCharts component for weekly attendance */}
+        <AttendanceCharts
+          weeklyStats={weeklyStats}
+          monthlyStats={monthlyStats}
+          attendanceDistribution={attendanceDistribution}
+          expandedSection={expandedSection}
+        />
       </MotiView>
 
       {/* Working Hours */}
@@ -548,48 +494,7 @@ export default function ProfileScreen() {
           />
         </TouchableOpacity>
 
-        {expandedSection === "workingHours" && (
-          <MotiView
-            from={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            transition={{ type: "timing", duration: 300 }}
-            style={styles.cardContent}
-          >
-            {monthlyStats.datasets[0].data.some((value: number) => value > 0) ? (
-              <View style={styles.chartContainer}>
-                <Text style={styles.chartTitle}>Hours Worked (Last 7 Days)</Text>
-                <LineChart
-                  data={monthlyStats}
-                  width={width - 60}
-                  height={220}
-                  yAxisSuffix="h"
-                  chartConfig={{
-                    backgroundColor: "#ffffff",
-                    backgroundGradientFrom: "#ffffff",
-                    backgroundGradientTo: "#ffffff",
-                    decimalPlaces: 1,
-                    color: (opacity = 1) => `rgba(108, 99, 255, ${opacity})`,
-                    labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-                    style: {
-                      borderRadius: 16,
-                    },
-                    propsForDots: {
-                      r: "6",
-                      strokeWidth: "2",
-                      stroke: "#6C63FF",
-                    },
-                  }}
-                  bezier
-                  style={styles.chart}
-                />
-              </View>
-            ) : (
-              <View style={styles.noDataContainer}>
-                <Text style={styles.noDataText}>No working hours data available</Text>
-              </View>
-            )}
-          </MotiView>
-        )}
+        {/* AttendanceCharts component handles this section */}
       </MotiView>
 
       {/* Attendance Distribution */}
@@ -621,40 +526,7 @@ export default function ProfileScreen() {
           />
         </TouchableOpacity>
 
-        {expandedSection === "attendanceDistribution" && (
-          <MotiView
-            from={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            transition={{ type: "timing", duration: 300 }}
-            style={styles.cardContent}
-          >
-            {attendanceData.length > 0 ? (
-              <View style={styles.chartContainer}>
-                <Text style={styles.chartTitle}>Check-ins vs Check-outs</Text>
-                <PieChart
-                  data={attendanceDistribution}
-                  width={width - 60}
-                  height={220}
-                  chartConfig={{
-                    backgroundColor: "#ffffff",
-                    backgroundGradientFrom: "#ffffff",
-                    backgroundGradientTo: "#ffffff",
-                    color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-                  }}
-                  accessor="data"
-                  backgroundColor="transparent"
-                  paddingLeft="15"
-                  absolute
-                  style={styles.chart}
-                />
-              </View>
-            ) : (
-              <View style={styles.noDataContainer}>
-                <Text style={styles.noDataText}>No attendance distribution data available</Text>
-              </View>
-            )}
-          </MotiView>
-        )}
+        {/* AttendanceCharts component handles this section */}
       </MotiView>
 
       {/* Recent Activity */}
@@ -689,40 +561,8 @@ export default function ProfileScreen() {
             transition={{ type: "timing", duration: 300 }}
             style={styles.cardContent}
           >
-            {attendanceData.length > 0 ? (
-              <View style={styles.activityList}>
-                {attendanceData.slice(0, 10).map((activity, index) => (
-                  <View key={activity.id || index} style={styles.activityItem}>
-                    <View
-                      style={[
-                        styles.activityTypeIndicator,
-                        {
-                          backgroundColor: activity.type === "check-in" ? "#E5F9F6" : "#FFE8E8",
-                        },
-                      ]}
-                    >
-                      {activity.type === "check-in" ? (
-                        <LogIn size={16} color="#34C759" />
-                      ) : (
-                        <LogOut size={16} color="#FF3B30" />
-                      )}
-                    </View>
-                    <View style={styles.activityDetails}>
-                      <Text style={styles.activityType}>
-                        {activity.type === "check-in" ? "Checked In" : "Checked Out"}
-                      </Text>
-                      <Text style={styles.activityTime}>
-                        {formatDate(activity.timestamp)} at {formatTime(activity.timestamp)}
-                      </Text>
-                    </View>
-                  </View>
-                ))}
-              </View>
-            ) : (
-              <View style={styles.noDataContainer}>
-                <Text style={styles.noDataText}>No recent activity available</Text>
-              </View>
-            )}
+            {/* Use the ActivityList component */}
+            <ActivityList activities={attendanceData} formatDate={formatDate} formatTime={formatTime} />
           </MotiView>
         )}
       </MotiView>
@@ -981,6 +821,17 @@ const styles = StyleSheet.create({
   activityTime: {
     fontSize: 12,
     color: "#666",
+    marginBottom: 4,
+  },
+  activityDuration: {
+    fontSize: 12,
+    color: "#6C63FF",
+    fontWeight: "500",
+  },
+  activityStatus: {
+    fontSize: 12,
+    color: "#34C759",
+    fontWeight: "500",
   },
   signOutButton: {
     flexDirection: "row",

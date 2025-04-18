@@ -15,18 +15,8 @@ import {
   Platform,
 } from "react-native"
 import { auth, db } from "../config/firebase"
-import {
-  Clock,
-  MapPin,
-  CheckCircle,
-  XCircle,
-  Calendar as CalendarIcon,
-  ArrowRight,
-  User,
-  ExternalLink,
-} from "lucide-react-native"
+import { Clock, MapPin, CheckCircle, Calendar as CalendarIcon, User, ExternalLink } from "lucide-react-native"
 import { useFocusEffect } from "@react-navigation/native"
-import { LinearGradient } from "expo-linear-gradient"
 import {
   doc,
   getDoc,
@@ -37,10 +27,23 @@ import {
   Timestamp,
   updateDoc,
   onSnapshot,
+  query,
+  where,
+  orderBy,
+  limit,
+  setDoc, // Import setDoc
 } from "firebase/firestore"
 import * as Location from "expo-location"
 import DateTimePicker from "@react-native-community/datetimepicker"
 import { Calendar } from "react-native-calendars"
+// Update the home screen to use the new components
+import { RecentActivityCard } from "../../components/home/RecentActivityCard"
+import { EffectiveHoursCard } from "../../components/home/EffectiveHoursCard"
+import { CheckInStatusCard } from "../../components/HomeComponents"
+import { OfflineIndicator } from "../../components/offline/OfflineIndicator"
+import { useNetworkStatus } from "../../utils/networkStatus"
+import * as localStorageService from "../../utils/localStorageService"
+import * as syncService from "../../utils/syncService"
 
 export default function HomeScreen() {
   // State variables
@@ -74,10 +77,33 @@ export default function HomeScreen() {
   const [showTimePicker, setShowTimePicker] = useState(null) // 'startHours', 'startMinutes', 'endHours', 'endMinutes', or null
   const [timePickerMode, setTimePickerMode] = useState("time")
   const [selectedDate, setSelectedDate] = useState(new Date())
+  const [pendingRecordsCount, setPendingRecordsCount] = useState(0)
+  const [isSyncing, setIsSyncing] = useState(false)
+
+  // Network status
+  const { isOnline, wasOffline, resetOfflineFlag } = useNetworkStatus()
 
   // For real-time updates
   const effectiveHoursInterval = useRef(null)
   const realTimeListeners = useRef([])
+
+  // Sync data when coming back online
+  useEffect(() => {
+    if (isOnline && wasOffline) {
+      handleSync()
+      resetOfflineFlag()
+    }
+  }, [isOnline, wasOffline])
+
+  // Check for pending records
+  useEffect(() => {
+    const checkPendingRecords = async () => {
+      const pendingRecords = await localStorageService.getPendingAttendance()
+      setPendingRecordsCount(pendingRecords.length)
+    }
+
+    checkPendingRecords()
+  }, [isOnline])
 
   // Request location permissions
   useEffect(() => {
@@ -104,6 +130,33 @@ export default function HomeScreen() {
       realTimeListeners.current.forEach((unsubscribe) => unsubscribe())
     }
   }, [])
+
+  // Handle sync function
+  const handleSync = async () => {
+    if (!isOnline) {
+      Alert.alert("Offline", "You are currently offline. Please try again when you're back online.")
+      return
+    }
+
+    try {
+      setIsSyncing(true)
+      await syncService.performFullSync()
+
+      // Refresh data after sync
+      await fetchUserData()
+
+      // Update pending records count
+      const pendingRecords = await localStorageService.getPendingAttendance()
+      setPendingRecordsCount(pendingRecords.length)
+
+      Alert.alert("Sync Complete", "Your offline data has been successfully synced.")
+    } catch (error) {
+      console.error("Error syncing data:", error)
+      Alert.alert("Sync Error", "There was an error syncing your data. Please try again.")
+    } finally {
+      setIsSyncing(false)
+    }
+  }
 
   // Start location tracking
   const startLocationTracking = async () => {
@@ -181,40 +234,69 @@ export default function HomeScreen() {
       if (!auth.currentUser || !userLocation) return
 
       const timestamp = new Date().toISOString()
-      const userRef = doc(db, "users", auth.currentUser.uid)
+      const checkInId = `${auth.currentUser.uid}_${timestamp}`
 
       // Create check-in record
       const checkInData = {
+        id: checkInId,
         type: "check-in",
         timestamp,
+        timestampDate: Timestamp.fromDate(new Date()),
         location: {
           latitude: userLocation.latitude,
           longitude: userLocation.longitude,
         },
         userId: auth.currentUser.uid,
+        paired: false,
+        automatic: true,
       }
 
-      // Add to attendance collection
-      await addDoc(collection(db, "attendance"), {
-        ...checkInData,
-      })
+      if (isOnline) {
+        // Add to attendance collection
+        await setDoc(doc(db, "attendance", checkInId), checkInData)
 
-      // Update user document
-      await updateDoc(userRef, {
-        checkedIn: true,
-        lastCheckIn: timestamp,
-        lastLocation: {
-          latitude: userLocation.latitude,
-          longitude: userLocation.longitude,
-        },
-      })
+        // Update user document
+        const userRef = doc(db, "users", auth.currentUser.uid)
+        await updateDoc(userRef, {
+          checkedIn: true,
+          lastCheckIn: timestamp,
+          currentCheckInId: checkInId,
+          lastLocation: {
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+          },
+        })
+      } else {
+        // Save to local storage for later sync
+        await localStorageService.savePendingAttendance(checkInData)
+
+        // Update local user data
+        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        await localStorageService.saveUserData({
+          ...userData,
+          checkedIn: true,
+          lastCheckIn: timestamp,
+          currentCheckInId: checkInId,
+          lastLocation: {
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+          },
+        })
+      }
 
       // Update local state
       setUserData({
         ...userData,
         checkedIn: true,
         lastCheckIn: timestamp,
+        currentCheckInId: checkInId,
       })
+
+      // Update pending records count if offline
+      if (!isOnline) {
+        const pendingRecords = await localStorageService.getPendingAttendance()
+        setPendingRecordsCount(pendingRecords.length)
+      }
 
       // Start real-time effective hours update
       startEffectiveHoursUpdate()
@@ -232,40 +314,88 @@ export default function HomeScreen() {
       if (!auth.currentUser || !userLocation) return
 
       const timestamp = new Date().toISOString()
-      const userRef = doc(db, "users", auth.currentUser.uid)
+      const checkOutId = `${auth.currentUser.uid}_${timestamp}`
+
+      // Calculate duration if we have a check-in time
+      let durationMinutes = 0
+      if (userData?.lastCheckIn) {
+        const checkInTime = new Date(userData.lastCheckIn)
+        const checkOutTime = new Date(timestamp)
+        const durationMs = checkOutTime.getTime() - checkInTime.getTime()
+        durationMinutes = Math.round(durationMs / (1000 * 60))
+      }
 
       // Create check-out record
       const checkOutData = {
+        id: checkOutId,
         type: "check-out",
         timestamp,
+        timestampDate: Timestamp.fromDate(new Date()),
         location: {
           latitude: userLocation.latitude,
           longitude: userLocation.longitude,
         },
         userId: auth.currentUser.uid,
+        checkInId: userData?.currentCheckInId,
+        durationMinutes,
+        automatic: true,
       }
 
-      // Add to attendance collection
-      await addDoc(collection(db, "attendance"), {
-        ...checkOutData,
-      })
+      if (isOnline) {
+        // Add to attendance collection
+        await setDoc(doc(db, "attendance", checkOutId), checkOutData)
 
-      // Update user document
-      await updateDoc(userRef, {
-        checkedIn: false,
-        lastCheckOut: timestamp,
-        lastLocation: {
-          latitude: userLocation.latitude,
-          longitude: userLocation.longitude,
-        },
-      })
+        // Update the check-in record to mark it as paired
+        if (userData?.currentCheckInId) {
+          await updateDoc(doc(db, "attendance", userData.currentCheckInId), {
+            paired: true,
+            checkOutId: checkOutId,
+            durationMinutes,
+          })
+        }
+
+        // Update user document
+        const userRef = doc(db, "users", auth.currentUser.uid)
+        await updateDoc(userRef, {
+          checkedIn: false,
+          lastCheckOut: timestamp,
+          currentCheckInId: null,
+          lastLocation: {
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+          },
+        })
+      } else {
+        // Save to local storage for later sync
+        await localStorageService.savePendingAttendance(checkOutData)
+
+        // Update local user data
+        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        await localStorageService.saveUserData({
+          ...userData,
+          checkedIn: false,
+          lastCheckOut: timestamp,
+          currentCheckInId: null,
+          lastLocation: {
+            latitude: userLocation.latitude,
+            longitude: userLocation.longitude,
+          },
+        })
+      }
 
       // Update local state
       setUserData({
         ...userData,
         checkedIn: false,
         lastCheckOut: timestamp,
+        currentCheckInId: null,
       })
+
+      // Update pending records count if offline
+      if (!isOnline) {
+        const pendingRecords = await localStorageService.getPendingAttendance()
+        setPendingRecordsCount(pendingRecords.length)
+      }
 
       // Stop real-time effective hours update
       if (effectiveHoursInterval.current) {
@@ -300,29 +430,52 @@ export default function HomeScreen() {
     try {
       if (!auth.currentUser) return
 
-      // Get activities
-      const activitiesSnapshot = await getDocs(collection(db, "attendance"))
-      const activitiesList = []
+      let activitiesList = []
 
-      activitiesSnapshot.forEach((doc) => {
-        const data = doc.data()
-        if (data.userId === auth.currentUser.uid) {
+      if (isOnline) {
+        // Get activities with a more specific query
+        const activitiesQuery = query(
+          collection(db, "attendance"),
+          where("userId", "==", auth.currentUser.uid),
+          orderBy("timestamp", "desc"),
+          limit(20), // Fetch more to ensure we have enough data for calculations
+        )
+
+        const activitiesSnapshot = await getDocs(activitiesQuery)
+        activitiesSnapshot.forEach((doc) => {
+          const data = doc.data()
           activitiesList.push({
             id: doc.id,
             type: data.type,
             timestamp: data.timestamp,
             location: data.location || null,
+            checkInId: data.checkInId || null,
+            paired: data.paired || false,
+            durationMinutes: data.durationMinutes || 0,
           })
-        }
+        })
+      }
+
+      // Get pending records from local storage
+      const pendingRecords = await localStorageService.getPendingAttendance()
+
+      // Filter to only include records for the current user
+      const userPendingRecords = pendingRecords.filter((record) => record.userId === auth.currentUser?.uid)
+
+      // Combine online and offline records
+      activitiesList = [...activitiesList, ...userPendingRecords]
+
+      // Sort by timestamp (most recent first)
+      activitiesList.sort((a, b) => {
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
       })
 
-      // Set activities state
-      setActivities(activitiesList.slice(0, 5).sort((a, b) => {
-        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-      }));
+      // Take only the 5 most recent for display
+      const recentActivities = activitiesList.slice(0, 5)
+      setActivities(recentActivities)
 
-      // Calculate effective hours with the current approved requests
-      calculateEffectiveHours(activitiesList, approvedRequests)
+      // Calculate effective hours with the complete dataset
+      calculateEffectiveHours(activitiesList)
     } catch (error) {
       console.error("Error fetching activities:", error)
     }
@@ -330,13 +483,25 @@ export default function HomeScreen() {
 
   // Fetch user data and related information
   const fetchUserData = async () => {
-    try {
-      if (!auth.currentUser) return
+    if (!auth.currentUser) return
 
-      // Get office location from settings
-      const officeDoc = await getDoc(doc(db, "settings", "office_location"))
-      if (officeDoc.exists()) {
-        const officeData = officeDoc.data()
+    try {
+      setLoading(true)
+
+      // Try to get office location from local storage first
+      let officeData = await localStorageService.getOfficeLocation()
+
+      // If not in local storage or online, try to get from Firebase
+      if (!officeData && isOnline) {
+        const officeDoc = await getDoc(doc(db, "settings", "office_location"))
+        if (officeDoc.exists()) {
+          officeData = officeDoc.data()
+          // Save to local storage for offline use
+          await localStorageService.saveOfficeLocation(officeData)
+        }
+      }
+
+      if (officeData) {
         setOfficeLocation(officeData)
 
         // Check if user is in office
@@ -345,77 +510,71 @@ export default function HomeScreen() {
         }
       }
 
-      // Get user document
-      const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid))
-      if (userDoc.exists()) {
-        setUserData(userDoc.data())
+      // Try to get user data from local storage first
+      let userData = await localStorageService.getUserData()
+
+      // If online, get from Firebase and update local storage
+      if (isOnline) {
+        const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid))
+        if (userDoc.exists()) {
+          userData = userDoc.data()
+          // Save to local storage for offline use
+          await localStorageService.saveUserData({
+            id: auth.currentUser.uid,
+            checkedIn: userData.checkedIn || false,
+            lastCheckIn: userData.lastCheckIn || null,
+            lastCheckOut: userData.lastCheckOut || null,
+            currentCheckInId: userData.currentCheckInId || null,
+            lastLocation: userData.lastLocation || null,
+          })
+        }
+      }
+
+      if (userData) {
+        setUserData(userData)
 
         // If checked in, start real-time effective hours update
-        if (userDoc.data().checkedIn) {
+        if (userData.checkedIn) {
           startEffectiveHoursUpdate()
         }
       }
 
-      // Set up real-time listener for attendance records
-      const unsubscribeAttendance = onSnapshot(collection(db, "attendance"), (snapshot) => {
-        const activitiesList = []
-        snapshot.forEach((doc) => {
-          const data = doc.data()
-          if (data.userId === auth.currentUser.uid) {
-            activitiesList.push({
-              id: doc.id,
-              type: data.type,
-              timestamp: data.timestamp,
-              location: data.location || null,
-            })
-          }
-        })
+      // Fetch activities directly instead of using a listener
+      await fetchActivitiesAndCalculateHours()
 
-        // Sort by timestamp (most recent first)
-        activitiesList.sort((a, b) => {
-          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-        })
+      // Check for pending records
+      const pendingRecords = await localStorageService.getPendingAttendance()
+      setPendingRecordsCount(pendingRecords.length)
 
-        // Take only the 5 most recent
-        const recentActivities = activitiesList.slice(0, 5)
-        setActivities(recentActivities)
+      // Set up real-time listener for onsite requests if online
+      if (isOnline) {
+        const unsubscribeRequests = onSnapshot(collection(db, "onsiteRequests"), (snapshot) => {
+          const pendingList = []
+          const approvedList = []
 
-        // Calculate effective hours
-        calculateEffectiveHours(activitiesList)
-      })
-
-      realTimeListeners.current.push(unsubscribeAttendance)
-
-      // Set up real-time listener for onsite requests
-      const unsubscribeRequests = onSnapshot(collection(db, "onsiteRequests"), (snapshot) => {
-        const pendingList = []
-        const approvedList = []
-
-        snapshot.forEach((doc) => {
-          const data = doc.data()
-          if (data.userId === auth.currentUser.uid) {
-            if (data.status === "pending") {
-              pendingList.push({
-                id: doc.id,
-                ...data,
-              })
-            } else if (data.status === "approved") {
-              approvedList.push({
-                id: doc.id,
-                ...data,
-              })
+          snapshot.forEach((doc) => {
+            const data = doc.data()
+            if (data.userId === auth.currentUser.uid) {
+              if (data.status === "pending") {
+                pendingList.push({
+                  id: doc.id,
+                  ...data,
+                })
+              } else if (data.status === "approved") {
+                approvedList.push({
+                  id: doc.id,
+                  ...data,
+                })
+              }
             }
-          }
+          })
+
+          setPendingRequests(pendingList)
+          setApprovedRequests(approvedList)
         })
 
-        setPendingRequests(pendingList)
-        setApprovedRequests(approvedList)
-
-        // Call fetchActivitiesAndCalculateHours to get fresh activities and calculate hours
-        fetchActivitiesAndCalculateHours()
-      })
-
-      realTimeListeners.current.push(unsubscribeRequests)
+        realTimeListeners.current.push(unsubscribeRequests)
+      }
     } catch (error) {
       console.error("Error fetching user data:", error)
       Alert.alert("Error", "Failed to load data. Please try again.")
@@ -425,7 +584,7 @@ export default function HomeScreen() {
     }
   }
 
-  // Calculate effective working hours
+  // Improve the calculateEffectiveHours function for more accurate calculations
   const calculateEffectiveHours = (activities, approvedOnsiteWork = approvedRequests) => {
     try {
       const today = new Date()
@@ -445,25 +604,45 @@ export default function HomeScreen() {
       })
 
       let totalMinutes = 0
-      let lastCheckIn = null
 
-      // Calculate time between check-in and check-out pairs
-      for (const activity of todayActivities) {
-        if (activity.type === "check-in") {
-          lastCheckIn = new Date(activity.timestamp)
-        } else if (activity.type === "check-out" && lastCheckIn) {
-          const checkOut = new Date(activity.timestamp)
-          const diffMs = checkOut - lastCheckIn
-          totalMinutes += diffMs / (1000 * 60)
-          lastCheckIn = null
+      // First, check for paired check-ins and check-outs with duration
+      const pairedActivities = todayActivities.filter(
+        (activity) => activity.type === "check-out" && activity.checkInId && activity.durationMinutes,
+      )
+
+      pairedActivities.forEach((activity) => {
+        totalMinutes += activity.durationMinutes
+      })
+
+      // Then handle unpaired check-ins
+      const unpaired = new Map()
+
+      todayActivities.forEach((activity) => {
+        if (activity.type === "check-in" && !activity.paired) {
+          unpaired.set(activity.id, activity)
         }
-      }
+      })
 
-      // If still checked in, count time until now
-      if (lastCheckIn && userData?.checkedIn) {
-        const now = new Date()
-        const diffMs = now - lastCheckIn
-        totalMinutes += diffMs / (1000 * 60)
+      // If still checked in, count time until now for the most recent unpaired check-in
+      if (userData?.checkedIn && unpaired.size > 0) {
+        // Find the most recent unpaired check-in
+        let mostRecentCheckIn = null
+        let mostRecentTime = 0
+
+        unpaired.forEach((checkIn) => {
+          const checkInTime = new Date(checkIn.timestamp).getTime()
+          if (checkInTime > mostRecentTime) {
+            mostRecentTime = checkInTime
+            mostRecentCheckIn = checkIn
+          }
+        })
+
+        if (mostRecentCheckIn) {
+          const now = new Date()
+          const checkInTime = new Date(mostRecentCheckIn.timestamp)
+          const diffMs = now - checkInTime
+          totalMinutes += diffMs / (1000 * 60)
+        }
       }
 
       // Add approved onsite work hours for today
@@ -488,7 +667,9 @@ export default function HomeScreen() {
             endOfDay.setHours(23, 59, 59, 999)
 
             const effectiveStart = startDateTime < startOfDay ? startOfDay : startDateTime
-            const effectiveEndDateTime = endDateTime > endOfDay ? endOfDay : endDateTime
+            let effectiveEndDateTime = endDateTime // Declare effectiveEndDateTime here
+
+            effectiveEndDateTime = endDateTime > endOfDay ? endOfDay : effectiveEndDateTime
 
             if (effectiveEndDateTime > effectiveStart) {
               const diffMs = effectiveEndDateTime - effectiveStart
@@ -633,6 +814,11 @@ export default function HomeScreen() {
         return
       }
 
+      if (!isOnline) {
+        Alert.alert("Offline", "You are currently offline. Please try again when you're back online.")
+        return
+      }
+
       await addDoc(collection(db, "onsiteRequests"), {
         userId: auth.currentUser.uid,
         userName: userData?.name || auth.currentUser.email.split("@")[0],
@@ -677,6 +863,7 @@ export default function HomeScreen() {
     )
   }
 
+  // In the render section, replace the existing cards with the new components
   return (
     <ScrollView
       style={styles.container}
@@ -696,6 +883,14 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      {/* Offline Indicator */}
+      <OfflineIndicator
+        isOnline={isOnline}
+        pendingCount={pendingRecordsCount}
+        onSync={handleSync}
+        isSyncing={isSyncing}
+      />
+
       {/* Location Status */}
       {locationPermission !== null && (
         <View style={[styles.locationStatus, isInOffice ? styles.locationStatusIn : styles.locationStatusOut]}>
@@ -711,73 +906,26 @@ export default function HomeScreen() {
       )}
 
       {/* Check-in Status Card */}
-      <LinearGradient
-        colors={userData?.checkedIn ? ["#6C63FF", "#5A52CC"] : ["#F8F9FA", "#F1F3F5"]}
-        style={styles.statusCard}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-      >
-        <View style={styles.statusCardContent}>
-          <View style={styles.statusIconContainer}>
-            {userData?.checkedIn ? <CheckCircle size={32} color="#fff" /> : <XCircle size={32} color="#FF6B6B" />}
-          </View>
-          <View style={styles.statusTextContainer}>
-            <Text style={[styles.statusTitle, userData?.checkedIn && styles.statusTitleCheckedIn]}>
-              {userData?.checkedIn ? "Currently Checked In" : "Not Checked In"}
-            </Text>
-            <Text style={[styles.statusSubtitle, userData?.checkedIn && styles.statusSubtitleCheckedIn]}>
-              {userData?.checkedIn
-                ? `Since ${formatTime(userData.lastCheckIn)}`
-                : userData?.lastCheckOut
-                  ? `Last checkout: ${formatTime(userData.lastCheckOut)}`
-                  : "No recent check-in records"}
-            </Text>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          style={[styles.statusButton, userData?.checkedIn && styles.statusButtonActive]}
-          onPress={() => {}}
-        >
-          <Text style={[styles.statusButtonText, userData?.checkedIn && styles.statusButtonTextActive]}>
-            {userData?.checkedIn ? "View Details" : "Go to Location Tab"}
-          </Text>
-          <ArrowRight size={16} color={userData?.checkedIn ? "#fff" : "#6C63FF"} />
-        </TouchableOpacity>
-      </LinearGradient>
+      <CheckInStatusCard
+        isCheckedIn={userData?.checkedIn}
+        lastCheckIn={userData?.lastCheckIn}
+        lastCheckOut={userData?.lastCheckOut}
+        onPress={() => {}}
+      />
 
       {/* Effective Hours Card */}
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={styles.cardTitleContainer}>
-            <Clock size={20} color="#6C63FF" />
-            <Text style={styles.cardTitle}>Today's Working Hours</Text>
-          </View>
-        </View>
-
-        <View style={styles.hoursContainer}>
-          <View style={styles.hoursStat}>
-            <Text style={styles.hoursValue}>{effectiveHours.toFixed(2)}</Text>
-            <Text style={styles.hoursLabel}>Hours</Text>
-          </View>
-
-          <View style={styles.progressContainer}>
-            <View style={styles.progressBar}>
-              <View style={[styles.progressFill, { width: `${Math.min((effectiveHours / 8) * 100, 100)}%` }]} />
-            </View>
-            <Text style={styles.progressText}>
-              {effectiveHours >= 8
-                ? "Daily target achieved!"
-                : `${((8 - effectiveHours) * 60).toFixed(0)} minutes remaining to target`}
-            </Text>
-          </View>
-        </View>
-      </View>
+      <EffectiveHoursCard effectiveHours={effectiveHours} />
 
       {/* Request Permission Button */}
-      <TouchableOpacity style={styles.requestButton} onPress={() => setModalVisible(true)}>
+      <TouchableOpacity
+        style={[styles.requestButton, !isOnline && styles.buttonDisabled]}
+        onPress={() => setModalVisible(true)}
+        disabled={!isOnline}
+      >
         <ExternalLink size={20} color="#fff" />
-        <Text style={styles.requestButtonText}>Request Onsite Work Permission</Text>
+        <Text style={styles.requestButtonText}>
+          {isOnline ? "Request Onsite Work Permission" : "Request Onsite Work (Offline)"}
+        </Text>
       </TouchableOpacity>
 
       {/* Pending Requests */}
@@ -857,47 +1005,7 @@ export default function HomeScreen() {
       )}
 
       {/* Recent Activity */}
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={styles.cardTitleContainer}>
-            <Clock size={20} color="#6C63FF" />
-            <Text style={styles.cardTitle}>Recent Activity</Text>
-          </View>
-        </View>
-
-        {activities.length > 0 ? (
-          activities.map((activity, index) => (
-            <View key={index} style={styles.activityItem}>
-              <View
-                style={[
-                  styles.activityIconContainer,
-                  { backgroundColor: activity.type === "check-in" ? "#E5F9F6" : "#FFE8E8" },
-                ]}
-              >
-                {activity.type === "check-in" ? (
-                  <CheckCircle size={16} color="#20C997" />
-                ) : (
-                  <XCircle size={16} color="#FF6B6B" />
-                )}
-              </View>
-              <View style={styles.activityContent}>
-                <Text style={styles.activityTitle}>{activity.type === "check-in" ? "Checked In" : "Checked Out"}</Text>
-                <Text style={styles.activityTime}>
-                  {formatDate(activity.timestamp)} at {formatTime(activity.timestamp)}
-                </Text>
-              </View>
-              {activity.location && (
-                <View style={styles.activityLocation}>
-                  <MapPin size={14} color="#6C757D" />
-                  <Text style={styles.activityLocationText}>Office</Text>
-                </View>
-              )}
-            </View>
-          ))
-        ) : (
-          <Text style={styles.noActivityText}>No recent activities</Text>
-        )}
-      </View>
+      <RecentActivityCard activities={activities} formatDate={formatDate} formatTime={formatTime} />
 
       {/* Permission Request Modal */}
       <Modal
@@ -1298,6 +1406,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 8,
     elevation: 4,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
   requestButtonText: {
     fontSize: 14,
