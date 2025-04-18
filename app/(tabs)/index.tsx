@@ -31,10 +31,9 @@ import {
   where,
   orderBy,
   limit,
-  setDoc, // Import setDoc
+  setDoc,
 } from "firebase/firestore"
 import * as Location from "expo-location"
-import DateTimePicker from "@react-native-community/datetimepicker"
 import { Calendar } from "react-native-calendars"
 // Update the home screen to use the new components
 import { RecentActivityCard } from "../../components/home/RecentActivityCard"
@@ -44,6 +43,115 @@ import { OfflineIndicator } from "../../components/offline/OfflineIndicator"
 import { useNetworkStatus } from "../../utils/networkStatus"
 import * as localStorageService from "../../utils/localStorageService"
 import * as syncService from "../../utils/syncService"
+
+// Custom DateTimePicker component that doesn't rely on native modules
+const CustomDateTimePicker = ({ value, onChange, mode }) => {
+  const [date, setDate] = useState(value || new Date())
+
+  // For time selection
+  const hours = [...Array(24)].map((_, i) => i.toString().padStart(2, "0"))
+  const minutes = [...Array(12)].map((_, i) => (i * 5).toString().padStart(2, "0"))
+
+  const handleChange = (newDate) => {
+    setDate(newDate)
+    onChange({ type: "set", nativeEvent: { timestamp: newDate.getTime() } })
+  }
+
+  if (mode === "date") {
+    return (
+      <View style={styles.customDatePicker}>
+        <Calendar
+          current={date}
+          onDayPress={(day) => {
+            const newDate = new Date(date)
+            newDate.setFullYear(day.year, day.month - 1, day.day)
+            handleChange(newDate)
+          }}
+          markedDates={{
+            [date.toISOString().split("T")[0]]: { selected: true, selectedColor: "#6C63FF" },
+          }}
+          theme={{
+            todayTextColor: "#6C63FF",
+            selectedDayBackgroundColor: "#6C63FF",
+            arrowColor: "#6C63FF",
+          }}
+        />
+      </View>
+    )
+  }
+
+  // Time picker
+  return (
+    <View style={styles.customTimePicker}>
+      <View style={styles.timePickerRow}>
+        <Text style={styles.timePickerLabel}>Hours:</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.timePickerScrollContent}
+        >
+          {hours.map((hour) => (
+            <TouchableOpacity
+              key={`hour-${hour}`}
+              style={[styles.timeOption, date.getHours() === Number.parseInt(hour) && styles.selectedTimeOption]}
+              onPress={() => {
+                const newDate = new Date(date)
+                newDate.setHours(Number.parseInt(hour))
+                handleChange(newDate)
+              }}
+            >
+              <Text
+                style={[
+                  styles.timeOptionText,
+                  date.getHours() === Number.parseInt(hour) && styles.selectedTimeOptionText,
+                ]}
+              >
+                {hour}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      <View style={styles.timePickerRow}>
+        <Text style={styles.timePickerLabel}>Minutes:</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.timePickerScrollContent}
+        >
+          {minutes.map((minute) => (
+            <TouchableOpacity
+              key={`minute-${minute}`}
+              style={[styles.timeOption, date.getMinutes() === Number.parseInt(minute) && styles.selectedTimeOption]}
+              onPress={() => {
+                const newDate = new Date(date)
+                newDate.setMinutes(Number.parseInt(minute))
+                handleChange(newDate)
+              }}
+            >
+              <Text
+                style={[
+                  styles.timeOptionText,
+                  date.getMinutes() === Number.parseInt(minute) && styles.selectedTimeOptionText,
+                ]}
+              >
+                {minute}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      <TouchableOpacity
+        style={styles.timePickerDoneButton}
+        onPress={() => onChange({ type: "set", nativeEvent: { timestamp: date.getTime() } })}
+      >
+        <Text style={styles.timePickerDoneButtonText}>Done</Text>
+      </TouchableOpacity>
+    </View>
+  )
+}
 
 export default function HomeScreen() {
   // State variables
@@ -74,7 +182,7 @@ export default function HomeScreen() {
   const [locationPermission, setLocationPermission] = useState(null)
   const [locationSubscription, setLocationSubscription] = useState(null)
   const [showCalendar, setShowCalendar] = useState(null) // 'start' or 'end' or null
-  const [showTimePicker, setShowTimePicker] = useState(null) // 'startHours', 'startMinutes', 'endHours', 'endMinutes', or null
+  const [showTimePicker, setShowTimePicker] = useState(null) // 'startTime', 'endTime', or null
   const [timePickerMode, setTimePickerMode] = useState("time")
   const [selectedDate, setSelectedDate] = useState(new Date())
   const [pendingRecordsCount, setPendingRecordsCount] = useState(0)
@@ -425,6 +533,8 @@ export default function HomeScreen() {
     }, 60000) // Every minute
   }
 
+  // Fix the Firebase index error in the fetchActivitiesAndCalculateHours function
+
   // Fetch activities and calculate hours
   const fetchActivitiesAndCalculateHours = async () => {
     try {
@@ -433,27 +543,61 @@ export default function HomeScreen() {
       let activitiesList = []
 
       if (isOnline) {
-        // Get activities with a more specific query
-        const activitiesQuery = query(
-          collection(db, "attendance"),
-          where("userId", "==", auth.currentUser.uid),
-          orderBy("timestamp", "desc"),
-          limit(20), // Fetch more to ensure we have enough data for calculations
-        )
+        try {
+          // Get activities with a more specific query
+          const activitiesQuery = query(
+            collection(db, "attendance"),
+            where("userId", "==", auth.currentUser.uid),
+            orderBy("timestamp", "desc"),
+            limit(20), // Fetch more to ensure we have enough data for calculations
+          )
 
-        const activitiesSnapshot = await getDocs(activitiesQuery)
-        activitiesSnapshot.forEach((doc) => {
-          const data = doc.data()
-          activitiesList.push({
-            id: doc.id,
-            type: data.type,
-            timestamp: data.timestamp,
-            location: data.location || null,
-            checkInId: data.checkInId || null,
-            paired: data.paired || false,
-            durationMinutes: data.durationMinutes || 0,
+          const activitiesSnapshot = await getDocs(activitiesQuery)
+          activitiesSnapshot.forEach((doc) => {
+            const data = doc.data()
+            activitiesList.push({
+              id: doc.id,
+              type: data.type,
+              timestamp: data.timestamp,
+              location: data.location || null,
+              checkInId: data.checkInId || null,
+              paired: data.paired || false,
+              durationMinutes: data.durationMinutes || 0,
+            })
           })
-        })
+        } catch (error) {
+          console.error("Firebase query error:", error)
+          // If the query fails due to missing index, try a simpler query
+          if (error.toString().includes("requires an index")) {
+            console.log("Falling back to simpler query without ordering")
+            const simpleQuery = query(
+              collection(db, "attendance"),
+              where("userId", "==", auth.currentUser.uid),
+              limit(30),
+            )
+
+            const simpleSnapshot = await getDocs(simpleQuery)
+            const tempActivities = []
+            simpleSnapshot.forEach((doc) => {
+              tempActivities.push({
+                id: doc.id,
+                type: doc.data().type,
+                timestamp: doc.data().timestamp,
+                location: doc.data().location || null,
+                checkInId: doc.data().checkInId || null,
+                paired: doc.data().paired || false,
+                durationMinutes: doc.data().durationMinutes || 0,
+              })
+            })
+
+            // Sort client-side instead of using orderBy
+            activitiesList = tempActivities
+              .sort((a, b) => {
+                return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+              })
+              .slice(0, 20)
+          }
+        }
       }
 
       // Get pending records from local storage
@@ -1054,7 +1198,7 @@ export default function HomeScreen() {
 
             {/* Time picker for time selection */}
             {showTimePicker && Platform.OS !== "web" && (
-              <DateTimePicker
+              <CustomDateTimePicker
                 value={
                   showTimePicker === "startTime"
                     ? (() => {
@@ -1070,9 +1214,7 @@ export default function HomeScreen() {
                         return date
                       })()
                 }
-                mode="time"
-                is24Hour={true}
-                display="default"
+                mode={timePickerMode}
                 onChange={handleTimeChange}
               />
             )}
@@ -1097,6 +1239,7 @@ export default function HomeScreen() {
                           // Web implementation uses dropdown
                         } else {
                           setShowTimePicker("startTime")
+                          setTimePickerMode("time")
                         }
                       }}
                     >
@@ -1146,6 +1289,7 @@ export default function HomeScreen() {
                           // Web implementation uses dropdown
                         } else {
                           setShowTimePicker("endTime")
+                          setTimePickerMode("time")
                         }
                       }}
                     >
@@ -1620,6 +1764,62 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   submitButtonText: {
+    color: "#fff",
+    fontWeight: "600",
+  },
+  // Custom date picker styles
+  customDatePicker: {
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+  },
+  customTimePicker: {
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    padding: 15,
+  },
+  timePickerRow: {
+    marginBottom: 15,
+  },
+  timePickerLabel: {
+    fontSize: 14,
+    fontWeight: "500",
+    marginBottom: 8,
+    color: "#495057",
+  },
+  timePickerScrollContent: {
+    paddingVertical: 5,
+  },
+  timeOption: {
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    marginRight: 8,
+    borderRadius: 8,
+    backgroundColor: "#f8f9fa",
+    borderWidth: 1,
+    borderColor: "#e9ecef",
+  },
+  selectedTimeOption: {
+    backgroundColor: "#6C63FF",
+    borderColor: "#6C63FF",
+  },
+  timeOptionText: {
+    fontSize: 14,
+    color: "#495057",
+  },
+  selectedTimeOptionText: {
+    color: "#fff",
+    fontWeight: "600",
+  },
+  timePickerDoneButton: {
+    backgroundColor: "#6C63FF",
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  timePickerDoneButtonText: {
     color: "#fff",
     fontWeight: "600",
   },

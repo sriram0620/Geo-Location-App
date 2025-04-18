@@ -17,11 +17,13 @@ import {
 import { router, Link } from "expo-router"
 import { signInWithEmailAndPassword } from "firebase/auth"
 import { doc, getDoc, updateDoc, setDoc } from "firebase/firestore"
-import { Lock, Mail, AlertCircle } from "lucide-react-native"
+import { Lock, Mail, AlertCircle, WifiOff, Smartphone } from "lucide-react-native"
 import { auth, db } from "../config/firebase"
-import * as Device from "expo-device"
 import { LinearGradient } from "expo-linear-gradient"
 import { MotiView } from "moti"
+import { useNetworkStatus } from "../../utils/networkStatus"
+import * as localStorageService from "../../utils/localStorageService"
+import { getDeviceInfo, verifyDeviceImei, getDeviceName } from "../../utils/deviceUtils"
 
 const { width, height } = Dimensions.get("window")
 
@@ -31,69 +33,51 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [deviceInfo, setDeviceInfo] = useState<any>(null)
+  const [deviceName, setDeviceName] = useState<string>("Detecting device...")
+  const { isOnline } = useNetworkStatus()
 
   useEffect(() => {
     // Get device info when component mounts
-    getDeviceInfo().then((info) => {
-      setDeviceInfo(info)
-    })
-  }, [])
-
-  const getDeviceInfo = async () => {
-    try {
-      // Handle web platform differently
-      if (Platform.OS === "web") {
-        return {
-          brand: "Web Browser",
-          modelName: navigator.userAgent,
-          osName: Platform.OS,
-          osVersion: "N/A",
-          deviceId: "web-" + Math.random().toString(36).substring(7),
-          imei: ["web-device"],
-        }
-      }
-
-      // For native platforms
-      const deviceData = {
-        brand: Device.brand || "Unknown",
-        modelName: Device.modelName || "Unknown",
-        osName: Device.osName || "Unknown",
-        osVersion: Device.osVersion || "Unknown",
-        deviceId: (await Device.getDeviceIdAsync()) || "unknown",
-        imei: [] as string[],
-      }
-
-      // Try to get IMEI (only works on Android with proper permissions)
-      if (Platform.OS === "android") {
-        try {
-          // @ts-ignore - TypeScript doesn't know about this method
-          const imei = (await Device.getImei?.()) || (await Device.getDeviceIdAsync())
-          if (imei) {
-            deviceData.imei.push(imei)
+    const fetchDeviceInfo = async () => {
+      try {
+        const info = await getDeviceInfo()
+        if (!info) {
+          console.error("Device info is null")
+          setDeviceName("Unknown device")
+          // Create a fallback device info object
+          const fallbackInfo = {
+            brand: "Unknown",
+            modelName: Platform.OS === "web" ? "Web Browser" : "Device",
+            osName: Platform.OS,
+            osVersion: "Unknown",
+            deviceId: `device-${Date.now()}`,
+            imei: [`imei-${Date.now()}`],
           }
-        } catch (error) {
-          console.log("Error getting IMEI:", error)
-          // Fallback to device ID
-          deviceData.imei.push(deviceData.deviceId)
+          setDeviceInfo(fallbackInfo)
+          return
         }
-      } else {
-        // For iOS, use device ID as IMEI is not accessible
-        deviceData.imei.push(deviceData.deviceId)
-      }
 
-      return deviceData
-    } catch (error) {
-      console.error("Error getting device info:", error)
-      return {
-        brand: "Unknown",
-        modelName: "Unknown",
-        osName: Platform.OS,
-        osVersion: "Unknown",
-        deviceId: `fallback-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-        imei: [`fallback-${Date.now()}-${Math.random().toString(36).substring(7)}`],
+        setDeviceInfo(info)
+        setDeviceName(getDeviceName(info))
+        console.log("Device info fetched:", info)
+      } catch (error) {
+        console.error("Error fetching device info:", error)
+        setDeviceName("Unknown device")
+        // Create a fallback device info object
+        const fallbackInfo = {
+          brand: "Unknown",
+          modelName: Platform.OS === "web" ? "Web Browser" : "Device",
+          osName: Platform.OS,
+          osVersion: "Unknown",
+          deviceId: `device-${Date.now()}`,
+          imei: [`imei-${Date.now()}`],
+        }
+        setDeviceInfo(fallbackInfo)
       }
     }
-  }
+
+    fetchDeviceInfo()
+  }, [])
 
   const handleLogin = async () => {
     try {
@@ -106,8 +90,23 @@ export default function LoginScreen() {
 
       setLoading(true)
 
+      if (!isOnline) {
+        setError("Cannot log in while offline. Please connect to the internet.")
+        setLoading(false)
+        return
+      }
+
+      if (!deviceInfo) {
+        setError("Unable to identify your device. Please try again.")
+        setLoading(false)
+        return
+      }
+
+      console.log("Attempting login with:", email)
+
       // Authenticate with Firebase
       const userCredential = await signInWithEmailAndPassword(auth, email, password)
+      console.log("Login successful for user:", userCredential.user.uid)
 
       // Get user document
       const userRef = doc(db, "users", userCredential.user.uid)
@@ -115,20 +114,45 @@ export default function LoginScreen() {
 
       if (userDoc.exists()) {
         const userData = userDoc.data()
+        console.log("User data retrieved:", userData.name)
 
         // Check if device IMEI matches the one saved during registration
         const registeredImei = userData.deviceInfo?.imei || []
         const currentImei = deviceInfo?.imei || []
 
-        const imeiMatches = registeredImei.some((savedImei: string) => currentImei.includes(savedImei))
+        console.log("Checking device IMEI:", currentImei, "against registered:", registeredImei)
+
+        const imeiMatches = verifyDeviceImei(registeredImei, currentImei)
 
         if (!imeiMatches && Platform.OS !== "web") {
           // If IMEI doesn't match and not on web, show error
+          console.log("IMEI verification failed")
           setLoading(false)
-          setError("You're using a different device than the one registered. Please contact admin for help.")
-          await auth.signOut() // Sign out the user
+          setError(
+            `Device verification failed. You're using a different device than the one registered. Please contact admin for help.\n\nCurrent device: ${getDeviceName(deviceInfo)}`,
+          )
+
+          // Don't sign out immediately, let the user see the error
+          setTimeout(async () => {
+            await auth.signOut() // Sign out the user after showing the error
+          }, 3000)
           return
         }
+
+        console.log("IMEI verification passed")
+
+        // Save user profile to local storage for offline use
+        await localStorageService.saveUserProfile({
+          uid: userCredential.user.uid,
+          email: userCredential.user.email,
+          name: userData?.name,
+          isAdmin: userData?.isAdmin || false,
+          createdAt: userData?.createdAt,
+          lastLogin: new Date().toISOString(),
+          status: "active",
+          biometricEnabled: userData?.biometricEnabled,
+          deviceInfo: deviceInfo,
+        })
 
         // Update user's device info and last login
         await updateDoc(userRef, {
@@ -139,13 +163,16 @@ export default function LoginScreen() {
 
         // Navigate based on user role
         if (userData?.isAdmin) {
+          console.log("Navigating to admin dashboard")
           router.replace("/admin")
         } else {
+          console.log("Navigating to tabs")
           router.replace("/(tabs)")
         }
       } else {
         // If user document doesn't exist (edge case), create it
-        await setDoc(userRef, {
+        console.log("Creating new user document")
+        const newUserData = {
           uid: userCredential.user.uid,
           email: userCredential.user.email,
           isAdmin: false,
@@ -157,8 +184,23 @@ export default function LoginScreen() {
           biometricAttempts: [],
           checkInHistory: [],
           checkedIn: false,
+        }
+
+        await setDoc(userRef, newUserData)
+
+        // Save user profile to local storage for offline use
+        await localStorageService.saveUserProfile({
+          uid: userCredential.user.uid,
+          email: userCredential.user.email,
+          isAdmin: false,
+          createdAt: new Date().toISOString(),
+          lastLogin: new Date().toISOString(),
+          status: "active",
+          biometricEnabled: true,
+          deviceInfo: deviceInfo,
         })
 
+        console.log("Navigating to tabs for new user")
         router.replace("/(tabs)")
       }
     } catch (error: any) {
@@ -200,6 +242,20 @@ export default function LoginScreen() {
           <Text style={styles.title}>Welcome Back</Text>
           <Text style={styles.subtitle}>Sign in to continue</Text>
 
+          {!isOnline && (
+            <MotiView
+              from={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ type: "spring", stiffness: 200 }}
+              style={[styles.errorContainer, styles.offlineContainer]}
+            >
+              <WifiOff size={20} color="#fff" />
+              <Text style={[styles.errorText, styles.offlineText]}>
+                You are offline. Please connect to the internet to log in.
+              </Text>
+            </MotiView>
+          )}
+
           {error ? (
             <MotiView
               from={{ opacity: 0, scale: 0.9 }}
@@ -211,6 +267,11 @@ export default function LoginScreen() {
               <Text style={styles.errorText}>{error}</Text>
             </MotiView>
           ) : null}
+
+          <View style={styles.deviceInfoContainer}>
+            <Smartphone size={18} color="#6C63FF" />
+            <Text style={styles.deviceInfoText}>{deviceName}</Text>
+          </View>
 
           <View style={styles.inputContainer}>
             <Mail size={20} color="#6C63FF" />
@@ -238,9 +299,9 @@ export default function LoginScreen() {
           </View>
 
           <TouchableOpacity
-            style={[styles.button, loading && styles.buttonDisabled]}
+            style={[styles.button, (loading || !isOnline) && styles.buttonDisabled]}
             onPress={handleLogin}
-            disabled={loading}
+            disabled={loading || !isOnline}
             activeOpacity={0.8}
           >
             {loading ? (
@@ -252,7 +313,7 @@ export default function LoginScreen() {
 
           <View style={styles.footer}>
             <Text style={styles.footerText}>Don't have an account? </Text>
-            <Link href="/signup" style={styles.link}>
+            <Link href="/signup" style={[styles.link, !isOnline && styles.linkDisabled]}>
               Sign Up
             </Link>
           </View>
@@ -316,8 +377,22 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16,
     color: "#666",
-    marginBottom: 30,
+    marginBottom: 20,
     textAlign: "center",
+  },
+  deviceInfoContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F0F0FF",
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 20,
+  },
+  deviceInfoText: {
+    marginLeft: 10,
+    color: "#6C63FF",
+    fontSize: 14,
+    flex: 1,
   },
   errorContainer: {
     flexDirection: "row",
@@ -327,11 +402,17 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 20,
   },
+  offlineContainer: {
+    backgroundColor: "#FF9500",
+  },
   errorText: {
     marginLeft: 10,
     color: "#FF3B30",
     fontSize: 14,
     flex: 1,
+  },
+  offlineText: {
+    color: "#fff",
   },
   inputContainer: {
     flexDirection: "row",
@@ -380,5 +461,8 @@ const styles = StyleSheet.create({
   link: {
     color: "#6C63FF",
     fontWeight: "600",
+  },
+  linkDisabled: {
+    color: "#BDB9FF",
   },
 })

@@ -22,6 +22,7 @@ import { formatDistanceToNow } from "date-fns"
 import { useNetworkStatus } from "../../utils/networkStatus"
 import * as localStorageService from "../../utils/localStorageService"
 import * as syncService from "../../utils/syncService"
+import * as authStorage from "../../utils/authStorage"
 
 // Define the context type
 type LocationContextType = {
@@ -146,6 +147,21 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         if (!isMounted) return
         setLoading(true)
 
+        // Check if user is authenticated (either online or offline)
+        let userId = auth.currentUser?.uid
+
+        if (!userId) {
+          // Try to get from local storage
+          const localUser = await authStorage.getAuthUser()
+          userId = localUser?.uid
+
+          if (!userId) {
+            setErrorMsg("User not authenticated")
+            setLoading(false)
+            return
+          }
+        }
+
         // Request location permissions
         const { status } = await Location.requestForegroundPermissionsAsync()
         if (status !== "granted") {
@@ -197,19 +213,24 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         let userData = await localStorageService.getUserData()
 
         // If online, get from Firebase and update local storage
-        if (isOnline && auth.currentUser) {
-          const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid))
-          if (userDoc.exists()) {
-            userData = userDoc.data()
-            // Save to local storage for offline use
-            await localStorageService.saveUserData({
-              id: auth.currentUser.uid,
-              checkedIn: userData.checkedIn || false,
-              lastCheckIn: userData.lastCheckIn || null,
-              lastCheckOut: userData.lastCheckOut || null,
-              currentCheckInId: userData.currentCheckInId || null,
-              lastLocation: userData.lastLocation || null,
-            })
+        if (isOnline && userId) {
+          try {
+            const userDoc = await getDoc(doc(db, "users", userId))
+            if (userDoc.exists()) {
+              userData = userDoc.data()
+              // Save to local storage for offline use
+              await localStorageService.saveUserData({
+                id: userId,
+                checkedIn: userData.checkedIn || false,
+                lastCheckIn: userData.lastCheckIn || null,
+                lastCheckOut: userData.lastCheckOut || null,
+                currentCheckInId: userData.currentCheckInId || null,
+                lastLocation: userData.lastLocation || null,
+              })
+            }
+          } catch (error) {
+            console.error("Error fetching user data from Firebase:", error)
+            // Continue with local data if available
           }
         }
 
@@ -385,8 +406,22 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
       lastAutoActionTimestamp.current = now
 
-      if (!auth.currentUser || !location) {
-        console.log("Cannot auto check-in: No user or location data")
+      // Get user ID (either from Firebase auth or local storage)
+      let userId = auth.currentUser?.uid
+
+      if (!userId) {
+        // Try to get from local storage
+        const localUser = await authStorage.getAuthUser()
+        userId = localUser?.uid
+
+        if (!userId) {
+          console.log("Cannot auto check-in: No user ID available")
+          return
+        }
+      }
+
+      if (!location) {
+        console.log("Cannot auto check-in: No location data")
         return
       }
 
@@ -406,7 +441,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
 
       if (isOnline) {
         // Check in Firebase
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         const userDoc = await getDoc(userRef)
         const userData = userDoc.data()
         hasUnpairedCheckIn = !!userData?.currentCheckInId
@@ -425,12 +460,12 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       const timestamp = new Date().toISOString()
 
       // Generate a unique ID for this check-in
-      const checkInId = `${auth.currentUser.uid}_${timestamp}`
+      const checkInId = `${userId}_${timestamp}`
 
       // Create check-in record
       const checkInData = {
         id: checkInId,
-        userId: auth.currentUser.uid,
+        userId: userId,
         type: "check-in",
         timestamp,
         timestampDate: Timestamp.fromDate(new Date()),
@@ -447,7 +482,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await setDoc(doc(db, "attendance", checkInId), checkInData)
 
         // Update user document
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         await updateDoc(userRef, {
           checkedIn: true,
           lastCheckIn: timestamp,
@@ -462,7 +497,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await localStorageService.savePendingAttendance(checkInData)
 
         // Update local user data
-        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        const userData = (await localStorageService.getUserData()) || { id: userId }
         await localStorageService.saveUserData({
           ...userData,
           checkedIn: true,
@@ -508,8 +543,22 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
       lastAutoActionTimestamp.current = now
 
-      if (!auth.currentUser || !location) {
-        console.log("Cannot auto check-out: No user or location data")
+      // Get user ID (either from Firebase auth or local storage)
+      let userId = auth.currentUser?.uid
+
+      if (!userId) {
+        // Try to get from local storage
+        const localUser = await authStorage.getAuthUser()
+        userId = localUser?.uid
+
+        if (!userId) {
+          console.log("Cannot auto check-out: No user ID available")
+          return
+        }
+      }
+
+      if (!location) {
+        console.log("Cannot auto check-out: No location data")
         return
       }
 
@@ -531,12 +580,12 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
 
       // Generate a unique ID for this check-out
-      const checkOutId = `${auth.currentUser.uid}_${timestamp}`
+      const checkOutId = `${userId}_${timestamp}`
 
       // Create check-out record
       const checkOutData = {
         id: checkOutId,
-        userId: auth.currentUser.uid,
+        userId: userId,
         type: "check-out",
         timestamp,
         timestampDate: Timestamp.fromDate(new Date()),
@@ -562,7 +611,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         })
 
         // Update user document
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         await updateDoc(userRef, {
           checkedIn: false,
           lastCheckOut: timestamp,
@@ -577,7 +626,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await localStorageService.savePendingAttendance(checkOutData)
 
         // Update local user data
-        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        const userData = (await localStorageService.getUserData()) || { id: userId }
         await localStorageService.saveUserData({
           ...userData,
           checkedIn: false,
@@ -616,13 +665,30 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
     try {
       setLoading(true)
 
-      if (!auth.currentUser || !location) {
-        Alert.alert("Error", "Unable to get location or user information")
+      // Get user ID (either from Firebase auth or local storage)
+      let userId = auth.currentUser?.uid
+
+      if (!userId) {
+        // Try to get from local storage
+        const localUser = await authStorage.getAuthUser()
+        userId = localUser?.uid
+
+        if (!userId) {
+          Alert.alert("Error", "User not authenticated")
+          setLoading(false)
+          return
+        }
+      }
+
+      if (!location) {
+        Alert.alert("Error", "Unable to get location information")
+        setLoading(false)
         return
       }
 
       if (!isInOffice) {
         Alert.alert("Error", "You must be within office premises to check in")
+        setLoading(false)
         return
       }
 
@@ -638,7 +704,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
 
       if (isOnline) {
         // Check in Firebase
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         const userDoc = await getDoc(userRef)
         const userData = userDoc.data()
         hasUnpairedCheckIn = !!userData?.currentCheckInId
@@ -657,12 +723,12 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       const timestamp = new Date().toISOString()
 
       // Generate a unique ID for this check-in
-      const checkInId = `${auth.currentUser.uid}_${timestamp}`
+      const checkInId = `${userId}_${timestamp}`
 
       // Create check-in record
       const checkInData = {
         id: checkInId,
-        userId: auth.currentUser.uid,
+        userId: userId,
         type: "check-in",
         timestamp,
         timestampDate: Timestamp.fromDate(new Date()),
@@ -679,7 +745,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await setDoc(doc(db, "attendance", checkInId), checkInData)
 
         // Update user document
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         await updateDoc(userRef, {
           checkedIn: true,
           lastCheckIn: timestamp,
@@ -694,7 +760,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await localStorageService.savePendingAttendance(checkInData)
 
         // Update local user data
-        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        const userData = (await localStorageService.getUserData()) || { id: userId }
         await localStorageService.saveUserData({
           ...userData,
           checkedIn: true,
@@ -737,8 +803,24 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
     try {
       setLoading(true)
 
-      if (!auth.currentUser || !location) {
-        Alert.alert("Error", "Unable to get location or user information")
+      // Get user ID (either from Firebase auth or local storage)
+      let userId = auth.currentUser?.uid
+
+      if (!userId) {
+        // Try to get from local storage
+        const localUser = await authStorage.getAuthUser()
+        userId = localUser?.uid
+
+        if (!userId) {
+          Alert.alert("Error", "User not authenticated")
+          setLoading(false)
+          return
+        }
+      }
+
+      if (!location) {
+        Alert.alert("Error", "Unable to get location information")
+        setLoading(false)
         return
       }
 
@@ -760,12 +842,12 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
 
       // Generate a unique ID for this check-out
-      const checkOutId = `${auth.currentUser.uid}_${timestamp}`
+      const checkOutId = `${userId}_${timestamp}`
 
       // Create check-out record
       const checkOutData = {
         id: checkOutId,
-        userId: auth.currentUser.uid,
+        userId: userId,
         type: "check-out",
         timestamp,
         timestampDate: Timestamp.fromDate(new Date()),
@@ -792,7 +874,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
             Alert.alert("Error", "This check-in has already been paired with a check-out.")
 
             // Fix the state if the database and local state are out of sync
-            const userRef = doc(db, "users", auth.currentUser.uid)
+            const userRef = doc(db, "users", userId)
             await updateDoc(userRef, {
               checkedIn: false,
               currentCheckInId: null,
@@ -812,7 +894,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         }
 
         // Update user document
-        const userRef = doc(db, "users", auth.currentUser.uid)
+        const userRef = doc(db, "users", userId)
         await updateDoc(userRef, {
           checkedIn: false,
           lastCheckOut: timestamp,
@@ -827,7 +909,7 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         await localStorageService.savePendingAttendance(checkOutData)
 
         // Update local user data
-        const userData = (await localStorageService.getUserData()) || { id: auth.currentUser.uid }
+        const userData = (await localStorageService.getUserData()) || { id: userId }
         await localStorageService.saveUserData({
           ...userData,
           checkedIn: false,
@@ -875,6 +957,20 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       })
       setLocation(currentLocation)
 
+      // Get user ID (either from Firebase auth or local storage)
+      let userId = auth.currentUser?.uid
+
+      if (!userId) {
+        // Try to get from local storage
+        const localUser = await authStorage.getAuthUser()
+        userId = localUser?.uid
+
+        if (!userId) {
+          setRefreshing(false)
+          return
+        }
+      }
+
       if (isOnline) {
         // Get fresh office location data from Firebase
         const officeDoc = await getDoc(doc(db, "settings", "office_location"))
@@ -890,30 +986,28 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
         }
 
         // Refresh user data from Firebase
-        if (auth.currentUser) {
-          const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid))
-          const userData = userDoc.data()
-          if (userData) {
-            setCheckedIn(userData.checkedIn || false)
-            setLastCheckIn(userData.lastCheckIn || null)
-            setLastCheckOut(userData.lastCheckOut || null)
-            setCurrentCheckInId(userData.currentCheckInId || null)
+        const userDoc = await getDoc(doc(db, "users", userId))
+        const userData = userDoc.data()
+        if (userData) {
+          setCheckedIn(userData.checkedIn || false)
+          setLastCheckIn(userData.lastCheckIn || null)
+          setLastCheckOut(userData.lastCheckOut || null)
+          setCurrentCheckInId(userData.currentCheckInId || null)
 
-            // Update check-in time
-            if (userData.checkedIn && userData.lastCheckIn) {
-              setCheckInTime(new Date(userData.lastCheckIn))
-            }
-
-            // Save to local storage for offline use
-            await localStorageService.saveUserData({
-              id: auth.currentUser.uid,
-              checkedIn: userData.checkedIn || false,
-              lastCheckIn: userData.lastCheckIn || null,
-              lastCheckOut: userData.lastCheckOut || null,
-              currentCheckInId: userData.currentCheckInId || null,
-              lastLocation: userData.lastLocation || null,
-            })
+          // Update check-in time
+          if (userData.checkedIn && userData.lastCheckIn) {
+            setCheckInTime(new Date(userData.lastCheckIn))
           }
+
+          // Save to local storage for offline use
+          await localStorageService.saveUserData({
+            id: userId,
+            checkedIn: userData.checkedIn || false,
+            lastCheckIn: userData.lastCheckIn || null,
+            lastCheckOut: userData.lastCheckOut || null,
+            currentCheckInId: userData.currentCheckInId || null,
+            lastLocation: userData.lastLocation || null,
+          })
         }
       } else {
         // Use local office location data
@@ -990,7 +1084,18 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
 
   // Update fetchRecentActivity to work offline
   const fetchRecentActivity = async () => {
-    if (!auth.currentUser) return
+    // Get user ID (either from Firebase auth or local storage)
+    let userId = auth.currentUser?.uid
+
+    if (!userId) {
+      // Try to get from local storage
+      const localUser = await authStorage.getAuthUser()
+      userId = localUser?.uid
+
+      if (!userId) {
+        return
+      }
+    }
 
     // Check if we've fetched activities recently
     const now = Date.now()
@@ -1005,28 +1110,53 @@ export const LocationProvider: React.FC<{ children: ReactNode }> = ({ children }
       let activities: any[] = []
 
       if (isOnline) {
-        // Get attendance records from Firebase
-        const attendanceQuery = query(
-          collection(db, "attendance"),
-          where("userId", "==", auth.currentUser.uid),
-          orderBy("timestamp", "desc"),
-          limit(10),
-        )
+        try {
+          // Modified query to avoid index errors - use only one orderBy clause
+          const attendanceQuery = query(
+            collection(db, "attendance"),
+            where("userId", "==", userId),
+            orderBy("timestamp", "desc"),
+            limit(10),
+          )
 
-        const querySnapshot = await getDocs(attendanceQuery)
-        querySnapshot.forEach((doc) => {
-          activities.push({
-            id: doc.id,
-            ...doc.data(),
+          const querySnapshot = await getDocs(attendanceQuery)
+          querySnapshot.forEach((doc) => {
+            activities.push({
+              id: doc.id,
+              ...doc.data(),
+            })
           })
-        })
+        } catch (error) {
+          console.error("Firebase query error:", error)
+          // If the query fails due to missing index, try a simpler query
+          if (error.toString().includes("requires an index")) {
+            console.log("Falling back to simpler query without ordering")
+            const simpleQuery = query(collection(db, "attendance"), where("userId", "==", userId), limit(20))
+
+            const simpleSnapshot = await getDocs(simpleQuery)
+            const tempActivities = []
+            simpleSnapshot.forEach((doc) => {
+              tempActivities.push({
+                id: doc.id,
+                ...doc.data(),
+              })
+            })
+
+            // Sort client-side instead of using orderBy
+            activities = tempActivities
+              .sort((a, b) => {
+                return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+              })
+              .slice(0, 10)
+          }
+        }
       }
 
       // Get pending records from local storage
       const pendingRecords = await localStorageService.getPendingAttendance()
 
       // Filter to only include records for the current user
-      const userPendingRecords = pendingRecords.filter((record) => record.userId === auth.currentUser?.uid)
+      const userPendingRecords = pendingRecords.filter((record) => record.userId === userId)
 
       // Combine online and offline records
       activities = [...activities, ...userPendingRecords]

@@ -1,0 +1,12 @@
+diff --git a/node_modules/react-native-device-info/src/index.ts b/node_modules/react-native-device-info/src/index.ts
+index 7a8a5e7..e5a8a9c 100644
+--- a/node_modules/react-native-device-info/src/index.ts
++++ b/node_modules/react-native-device-info/src/index.ts
+@@ -1,6 +1,6 @@
+ import { NativeModules, Platform, NativeEventEmitter } from 'react-native';
+ 
+-const RNDeviceInfo = NativeModules.RNDeviceInfo;
++const RNDeviceInfo = NativeModules.RNDeviceInfo || {};
+ 
+ if (!RNDeviceInfo && Platform.OS === 'web') {
+   // @ts-ignore

@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage"
+import { Timestamp } from "firebase/firestore"
 
 // Keys for local storage
 const KEYS = {
@@ -6,6 +7,7 @@ const KEYS = {
   USER_DATA: "userData",
   OFFICE_LOCATION: "officeLocation",
   LAST_SYNC: "lastSync",
+  USER_PROFILE: "userProfile",
 }
 
 // Interface for attendance record
@@ -40,6 +42,19 @@ interface UserData {
   }
 }
 
+// Interface for user profile (more complete user data)
+interface UserProfile {
+  uid: string
+  email: string
+  name?: string
+  isAdmin?: boolean
+  createdAt?: string
+  lastLogin?: string
+  status?: string
+  biometricEnabled?: boolean
+  deviceInfo?: any
+}
+
 // Interface for office location
 interface OfficeLocation {
   latitude: number
@@ -62,6 +77,7 @@ export const savePendingAttendance = async (record: AttendanceRecord): Promise<v
 
     // Save back to storage
     await AsyncStorage.setItem(KEYS.PENDING_ATTENDANCE, JSON.stringify(existingRecords))
+    console.log("Saved pending attendance record:", record.id)
   } catch (error) {
     console.error("Error saving pending attendance:", error)
     throw error
@@ -83,6 +99,7 @@ export const getPendingAttendance = async (): Promise<AttendanceRecord[]> => {
 export const clearPendingAttendance = async (): Promise<void> => {
   try {
     await AsyncStorage.removeItem(KEYS.PENDING_ATTENDANCE)
+    console.log("Cleared pending attendance records")
   } catch (error) {
     console.error("Error clearing pending attendance:", error)
     throw error
@@ -93,6 +110,7 @@ export const clearPendingAttendance = async (): Promise<void> => {
 export const saveUserData = async (data: UserData): Promise<void> => {
   try {
     await AsyncStorage.setItem(KEYS.USER_DATA, JSON.stringify(data))
+    console.log("Saved user data for ID:", data.id)
   } catch (error) {
     console.error("Error saving user data:", error)
     throw error
@@ -110,10 +128,33 @@ export const getUserData = async (): Promise<UserData | null> => {
   }
 }
 
+// Save user profile (more complete user data)
+export const saveUserProfile = async (profile: UserProfile): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(KEYS.USER_PROFILE, JSON.stringify(profile))
+    console.log("Saved user profile for UID:", profile.uid)
+  } catch (error) {
+    console.error("Error saving user profile:", error)
+    throw error
+  }
+}
+
+// Get user profile from local storage
+export const getUserProfile = async (): Promise<UserProfile | null> => {
+  try {
+    const profileJson = await AsyncStorage.getItem(KEYS.USER_PROFILE)
+    return profileJson ? JSON.parse(profileJson) : null
+  } catch (error) {
+    console.error("Error getting user profile:", error)
+    return null
+  }
+}
+
 // Save office location data
 export const saveOfficeLocation = async (data: OfficeLocation): Promise<void> => {
   try {
     await AsyncStorage.setItem(KEYS.OFFICE_LOCATION, JSON.stringify(data))
+    console.log("Saved office location data")
   } catch (error) {
     console.error("Error saving office location:", error)
     throw error
@@ -135,6 +176,7 @@ export const getOfficeLocation = async (): Promise<OfficeLocation | null> => {
 export const saveLastSync = async (): Promise<void> => {
   try {
     await AsyncStorage.setItem(KEYS.LAST_SYNC, new Date().toISOString())
+    console.log("Saved last sync timestamp")
   } catch (error) {
     console.error("Error saving last sync:", error)
     throw error
@@ -148,5 +190,33 @@ export const getLastSync = async (): Promise<string | null> => {
   } catch (error) {
     console.error("Error getting last sync:", error)
     return null
+  }
+}
+
+// Helper function to convert Firebase Timestamp to ISO string
+export const timestampToISOString = (timestamp: any): string => {
+  if (!timestamp) return new Date().toISOString()
+
+  if (timestamp instanceof Timestamp) {
+    return new Date(timestamp.seconds * 1000).toISOString()
+  }
+
+  if (timestamp.seconds) {
+    return new Date(timestamp.seconds * 1000).toISOString()
+  }
+
+  if (typeof timestamp === "string") {
+    return timestamp
+  }
+
+  return new Date().toISOString()
+}
+
+// Helper function to convert ISO string to Firebase Timestamp-like object
+export const isoStringToTimestamp = (isoString: string): any => {
+  const date = new Date(isoString)
+  return {
+    seconds: Math.floor(date.getTime() / 1000),
+    nanoseconds: (date.getTime() % 1000) * 1000000,
   }
 }

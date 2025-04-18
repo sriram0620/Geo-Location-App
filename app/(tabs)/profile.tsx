@@ -74,29 +74,66 @@ export default function ProfileScreen() {
       }
 
       // Get attendance records with a more specific query
-      const attendanceQuery = query(
-        collection(db, "attendance"),
-        where("userId", "==", auth.currentUser.uid),
-        orderBy("timestampDate", "desc"),
-        limit(100), // Fetch more records to ensure we have enough data for calculations
-      )
+      try {
+        const attendanceQuery = query(
+          collection(db, "attendance"),
+          where("userId", "==", auth.currentUser.uid),
+          orderBy("timestampDate", "desc"),
+          limit(100), // Fetch more records to ensure we have enough data for calculations
+        )
 
-      const attendanceSnapshot = await getDocs(attendanceQuery)
-      const attendanceRecords = []
-      attendanceSnapshot.forEach((doc) => {
-        attendanceRecords.push({
-          id: doc.id,
-          ...doc.data(),
+        const attendanceSnapshot = await getDocs(attendanceQuery)
+        const attendanceRecords = []
+        attendanceSnapshot.forEach((doc) => {
+          attendanceRecords.push({
+            id: doc.id,
+            ...doc.data(),
+          })
         })
-      })
 
-      setAttendanceData(attendanceRecords)
+        setAttendanceData(attendanceRecords)
 
-      // Process data for charts with real data
-      processAttendanceData(attendanceRecords)
+        // Process data for charts with real data
+        processAttendanceData(attendanceRecords)
 
-      // Calculate effective hours with real data
-      calculateEffectiveHours(attendanceRecords)
+        // Calculate effective hours with real data
+        calculateEffectiveHours(attendanceRecords)
+      } catch (error) {
+        console.error("Firebase query error:", error)
+        // If the query fails due to missing index, try a simpler query
+        if (error.toString().includes("requires an index")) {
+          console.log("Falling back to simpler query without ordering")
+          const simpleQuery = query(
+            collection(db, "attendance"),
+            where("userId", "==", auth.currentUser.uid),
+            limit(100),
+          )
+
+          const simpleSnapshot = await getDocs(simpleQuery)
+          const attendanceRecords = []
+          simpleSnapshot.forEach((doc) => {
+            attendanceRecords.push({
+              id: doc.id,
+              ...doc.data(),
+            })
+          })
+
+          // Sort client-side instead of using orderBy
+          attendanceRecords.sort((a, b) => {
+            const dateA = a.timestampDate?.seconds ? new Date(a.timestampDate.seconds * 1000) : new Date(a.timestamp)
+            const dateB = b.timestampDate?.seconds ? new Date(b.timestampDate.seconds * 1000) : new Date(b.timestamp)
+            return dateB.getTime() - dateA.getTime()
+          })
+
+          setAttendanceData(attendanceRecords)
+
+          // Process data for charts with real data
+          processAttendanceData(attendanceRecords)
+
+          // Calculate effective hours with real data
+          calculateEffectiveHours(attendanceRecords)
+        }
+      }
     } catch (error) {
       console.error("Error fetching user data:", error)
     } finally {
